@@ -97,7 +97,7 @@ class YouTubeProvider {
   duration() { return ytReady ? ytPlayer.getDuration() : 0; }
 }
 class SoundCloudProvider {
-  constructor() { this.name = "soundcloud"; }
+  constructor() { this.name = "soundcloud"; this.position = 0; this.length = 0; }
   play(track) {
     if (!scReady || !scWidget) { setStatus("Подключаем SoundCloud Widget…"); return; }
     this.stop();
@@ -193,32 +193,90 @@ function markUnavailable(track, message) {
 function renderSkeletons() {
   $("#searchResults").innerHTML = Array.from({length:5}, () => '<div class="skeleton-result"><span></span><div><i></i><i></i></div><b></b></div>').join("");
 }
-const invidiousInstances = ["https://inv.nadeko.net","https://inv.tux.pizza","https://invidious.nerdvpn.de"];
+// Keep this list aligned with the public instances documented by Invidious.
+// Public instances can rate-limit, block browser CORS, or temporarily go offline.
+const invidiousInstances = [
+  "https://invidious.nerdvpn.de",
+  "https://yt.chocolatemoo53.com",
+  "https://invidious.tiekoetter.com",
+  "https://inv.nadeko.net"
+];
+async function fetchWithTimeout(url, timeoutMs = 9000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: { "Accept": "application/json" },
+      mode: "cors",
+      cache: "no-store"
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function searchYouTube(query) {
-  let lastError;
+  const failures = [];
   for (const host of invidiousInstances) {
     try {
-      const response = await fetch(`${host}/api/v1/search?q=${encodeURIComponent(query)}&type=video`);
-      if (!response.ok) throw new Error("Search unavailable");
+      const response = await fetchWithTimeout(
+        `${host}/api/v1/search?q=${encodeURIComponent(query)}&type=video`
+      );
+      if (!response.ok) {
+        failures.push(`${new URL(host).host}: HTTP ${response.status}`);
+        continue;
+      }
       const data = await response.json();
-      return data.filter(x => x.type === "video" && x.videoId).slice(0,12).map(x => ({
-        id:`yt-${x.videoId}`, videoId:x.videoId, title:x.title || "Без названия",
-        artist:x.author || "YouTube", duration:x.lengthSeconds || 0, source:"youtube",
-        artwork:`https://i.ytimg.com/vi/${encodeURIComponent(x.videoId)}/mqdefault.jpg`
-      }));
-    } catch (e) { lastError = e; }
+      if (!Array.isArray(data)) {
+        failures.push(`${new URL(host).host}: неожиданный ответ API`);
+        continue;
+      }
+      const tracks = data
+        .filter(item => item && item.type === "video" && item.videoId)
+        .slice(0, 15)
+        .map(item => ({
+          id: `yt-${item.videoId}`,
+          videoId: item.videoId,
+          title: item.title || "Без названия",
+          artist: item.author || "YouTube",
+          duration: Number(item.lengthSeconds) || 0,
+          source: "youtube",
+          artwork: `https://i.ytimg.com/vi/${encodeURIComponent(item.videoId)}/mqdefault.jpg`
+        }));
+      if (tracks.length) return tracks;
+      failures.push(`${new URL(host).host}: пустая выдача`);
+    } catch (error) {
+      failures.push(`${new URL(host).host}: ${error.name === "AbortError" ? "тайм-аут" : "сеть/CORS"}`);
+    }
   }
-  throw lastError || new Error("Search unavailable");
+  const error = new Error("Не удалось получить результаты YouTube. Публичные поисковые серверы могут быть недоступны или блокировать запросы с GitHub Pages.");
+  error.details = failures;
+  throw error;
 }
 function searchSoundCloud(query) {
-  // SoundCloud does not expose anonymous catalogue search through the Widget API.
-  // Present a truthful in-app widget-search attempt; actual track playback requires a track permalink.
+  // Widget API can play a known track permalink, but it does not provide anonymous catalogue search.
   return [{
-    id:`sc-search-${Date.now()}`, title:`Поиск «${query}» в SoundCloud`,
-    artist:"SoundCloud · поиск в виджете", source:"soundcloud",
-    permalink_url:`https://soundcloud.com/search/sounds?q=${encodeURIComponent(query)}`,
-    artwork:"", searchShortcut:true
+    id: `sc-search-${Date.now()}`,
+    title: `Искать «${query}» в SoundCloud`,
+    artist: "SoundCloud · откроется страница поиска",
+    source: "soundcloud",
+    permalink_url: `https://soundcloud.com/search/sounds?q=${encodeURIComponent(query)}`,
+    artwork: "",
+    searchShortcut: true
   }];
+}
+function renderSearchFailure(query, details = []) {
+  const detailText = details.length
+    ? `<details class="search-diagnostics"><summary>Подробности</summary><small>${details.map(escapeHTML).join("<br>")}</small></details>`
+    : "";
+  $("#searchResults").innerHTML = `
+    <div class="search-placeholder search-error">
+      <span>!</span><b>Не удалось выполнить поиск</b>
+      <p>Публичные поисковые серверы YouTube не ответили. Это не ошибка введённого запроса. Попробуй ещё раз чуть позже.</p>
+      <button class="outline-btn" id="retrySearch">Повторить поиск</button>
+      ${detailText}
+    </div>`;
+  $("#retrySearch")?.addEventListener("click", searchTracks);
 }
 function renderResults(results) {
   $("#searchResults").innerHTML = results.map((t,i) => `
@@ -231,7 +289,9 @@ function renderResults(results) {
   $$(".result-play").forEach(b => b.addEventListener("click", () => {
     const selected = results[Number(b.dataset.resultIndex)];
     if (selected.searchShortcut) {
-      enqueueAndPlay(selected, results);
+      // SoundCloud's Widget API accepts track permalinks, not search-result URLs.
+      // Open the catalogue search explicitly; never pretend this URL is a playable track.
+      window.location.assign(selected.permalink_url);
       return;
     }
     enqueueAndPlay(selected, results);
@@ -240,22 +300,35 @@ function renderResults(results) {
 async function searchTracks() {
   const query = $("#searchInput").value.trim();
   if (!query) return toast("Напиши название трека или исполнителя");
-  const token = ++searchToken; renderSkeletons();
+  const token = ++searchToken;
+  renderSkeletons();
   const tasks = [];
-  if (currentTab === "all" || currentTab === "youtube") {
-    if (state.sources.youtube) tasks.push(searchYouTube(query).catch(() => []));
+  let youtubeError = null;
+
+  if ((currentTab === "all" || currentTab === "youtube") && state.sources.youtube) {
+    tasks.push(searchYouTube(query).catch(error => {
+      youtubeError = error;
+      return [];
+    }));
   }
-  if (currentTab === "all" || currentTab === "soundcloud") {
-    if (state.sources.soundcloud) tasks.push(Promise.resolve(searchSoundCloud(query)));
+  if ((currentTab === "all" || currentTab === "soundcloud") && state.sources.soundcloud) {
+    tasks.push(Promise.resolve(searchSoundCloud(query)));
   }
-  if (currentTab === "all" || currentTab === "local") {
-    if (state.sources.local) tasks.push(Promise.resolve(localTracks.filter(t => `${t.title} ${t.artist}`.toLowerCase().includes(query.toLowerCase()))));
+  if ((currentTab === "all" || currentTab === "local") && state.sources.local) {
+    tasks.push(Promise.resolve(localTracks.filter(track =>
+      `${track.title} ${track.artist}`.toLowerCase().includes(query.toLowerCase())
+    )));
   }
+
   const groups = await Promise.all(tasks);
   if (token !== searchToken) return;
   const results = groups.flat();
+
   if (!results.length) {
-    $("#searchResults").innerHTML = '<div class="search-placeholder"><span>⌕</span><b>Ничего не найдено</b><p>Проверь включённые источники или попробуй другой запрос.</p></div>';
+    if (youtubeError) renderSearchFailure(query, youtubeError.details || []);
+    else {
+      $("#searchResults").innerHTML = '<div class="search-placeholder"><span>⌕</span><b>Ничего не найдено</b><p>Проверь включённые источники или попробуй другой запрос.</p></div>';
+    }
     return;
   }
   renderResults(results);
@@ -395,7 +468,12 @@ $$("[data-source-setting]").forEach(input=>{
   });
 });
 $("#videoSetting").checked=state.videoMode;
-$("#videoSetting").addEventListener("change",e=>{state.videoMode=e.target.checked;$("#videoToggle").click();});
+$("#videoSetting").addEventListener("change",e=>{
+  state.videoMode=e.target.checked;
+  $("#youtubeStage").classList.toggle("video-mode",state.videoMode && currentTrack()?.source==="youtube");
+  $("#youtubeStage").classList.toggle("audio-mode",!state.videoMode || currentTrack()?.source!=="youtube");
+  saveState();
+});
 $("#autoplaySetting").checked=localStorage.getItem("mibbi-auto")!=="false";
 $("#autoplaySetting").addEventListener("change",e=>localStorage.setItem("mibbi-auto",e.target.checked));
 
