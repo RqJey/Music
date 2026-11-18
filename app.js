@@ -11,7 +11,9 @@ const state = {
   sources: { youtube: true, soundcloud: true, local: true }
 };
 let localTracks = [];
-let favorites = new Set(JSON.parse(localStorage.getItem("mibbi-favs") || "[]"));
+let favorites = {};
+try { favorites = JSON.parse(localStorage.getItem("mibbi-favs-v2") || "{}"); } catch { favorites = {}; }
+if (Array.isArray(favorites)) favorites = {};
 let ytPlayer = null, ytReady = false, scWidget = null, scReady = false;
 let activeProvider = null, searchToken = 0, currentTab = "all", progressTimer = null;
 
@@ -32,29 +34,80 @@ function formatTime(sec) {
 }
 function currentTrack() { return state.queue[state.index] || null; }
 
+function trackSnapshot(track) {
+  if (!track) return null;
+  return {
+    id:track.id, title:track.title, artist:track.artist, source:track.source,
+    videoId:track.videoId || null, permalink_url:track.permalink_url || null,
+    artwork:track.artwork || "", duration:Number(track.duration)||0,
+    preview:!!track.preview, unavailable:!!track.unavailable,
+    objectUrl: null
+  };
+}
+function saveFavorites() {
+  localStorage.setItem("mibbi-favs-v2", JSON.stringify(favorites));
+  renderFavoriteCount();
+}
+function isLiked(track) { return !!(track && favorites[track.id]); }
+function toggleLike(track) {
+  if (!track) return;
+  if (isLiked(track)) {
+    delete favorites[track.id];
+    toast("Убрано из любимых");
+  } else {
+    favorites[track.id] = { ...trackSnapshot(track), likedAt: Date.now() };
+    toast("Добавлено в любимые");
+  }
+  saveFavorites();
+  refreshLikeButtons();
+  if (!$("#favoritesView").classList.contains("hidden")) renderFavorites();
+}
+function refreshLikeButtons() {
+  $$("[data-like-id]").forEach(button => {
+    const liked = !!favorites[button.dataset.likeId];
+    button.classList.toggle("liked", liked);
+    button.textContent = liked ? "♥" : "♡";
+    button.setAttribute("aria-label", liked ? "Убрать из любимых" : "Добавить в любимые");
+  });
+  const track = currentTrack();
+  $("#likeBtn").textContent = isLiked(track) ? "♥" : "♡";
+  $("#likeBtn").classList.toggle("liked", isLiked(track));
+}
+function renderFavoriteCount() {
+  const count = Object.keys(favorites).length;
+  if ($("#favoriteCount")) $("#favoriteCount").textContent = count;
+  if ($("#favoritesHeadingCount")) $("#favoritesHeadingCount").textContent = `${count} ${count === 1 ? "трек" : count < 5 ? "трека" : "треков"} · Лайки хранятся только на этом устройстве`;
+}
 function saveState() {
-  const queue = state.queue.filter(t => t.source !== "local").map(t => ({
-    id:t.id, title:t.title, artist:t.artist, videoId:t.videoId,
-    permalink_url:t.permalink_url, artwork:t.artwork, source:t.source, duration:t.duration
-  }));
+  const queue = state.queue.map(trackSnapshot).filter(Boolean);
+  const current = currentTrack();
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    queue, index: state.index, volume: state.volume, shuffle: state.shuffle,
-    repeat: state.repeat, videoMode: state.videoMode
+    queue, currentId: current?.source !== "local" ? current?.id : null,
+    index: current?.source !== "local" ? queue.findIndex(t => t.id === current.id) : -1,
+    volume: state.volume, shuffle: state.shuffle, repeat: state.repeat,
+    videoMode: state.videoMode
   }));
   localStorage.setItem(SOURCES_KEY, JSON.stringify(state.sources));
+  renderQueueCount();
 }
+
+let pendingResume = null;
 function restoreState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
     if (Array.isArray(saved.queue)) state.queue = saved.queue;
-    if (Number.isInteger(saved.index)) state.index = saved.index;
     if (typeof saved.volume === "number") state.volume = saved.volume;
     state.shuffle = !!saved.shuffle; state.repeat = !!saved.repeat; state.videoMode = !!saved.videoMode;
+    if (saved.currentId) {
+      const index = state.queue.findIndex(t => t.id === saved.currentId && t.source !== "local");
+      if (index >= 0) pendingResume = { index, title: state.queue[index].title };
+    }
     const sources = JSON.parse(localStorage.getItem(SOURCES_KEY) || "{}");
     state.sources = { ...state.sources, ...sources };
+    state.index = -1; // Never autoplay external sources after a reload.
   } catch { localStorage.removeItem(STORAGE_KEY); }
-  if (state.index >= state.queue.length) state.index = -1;
 }
+
 function setTheme(theme) {
   const resolved = theme === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : theme;
   document.documentElement.dataset.theme = resolved;
@@ -241,7 +294,7 @@ async function searchYouTube(query) {
           artist: item.author || "YouTube",
           duration: Number(item.lengthSeconds) || 0,
           source: "youtube",
-          artwork: `https://i.ytimg.com/vi/${encodeURIComponent(item.videoId)}/mqdefault.jpg`
+          artwork: `https://i.ytimg.com/vi/${encodeURIComponent(item.videoId)}/hqdefault.jpg`
         }));
       if (tracks.length) return tracks;
       failures.push(`${new URL(host).host}: пустая выдача`);
@@ -278,25 +331,190 @@ function renderSearchFailure(query, details = []) {
     </div>`;
   $("#retrySearch")?.addEventListener("click", searchTracks);
 }
-function renderResults(results) {
-  $("#searchResults").innerHTML = results.map((t,i) => `
-    <article class="youtube-result ${t.unavailable ? "unavailable" : ""}" data-track-id="${escapeHTML(t.id)}">
-      <img src="${escapeHTML(t.artwork || (t.source === "youtube" ? "" : ""))}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">
-      <div class="youtube-result-copy"><b>${escapeHTML(t.title)}</b><small>${escapeHTML(t.artist)}${t.duration ? " · "+formatTime(t.duration) : ""}</small>
-      <span class="source-badge source-${t.source}">${t.searchShortcut ? "Поиск SoundCloud" : ({youtube:"YouTube",soundcloud:"SoundCloud",local:"Мои файлы"}[t.source] || t.source)}</span></div>
-      <button class="result-play" data-result-index="${i}" title="Играть" ${t.unavailable ? "disabled" : ""}>▶</button>
-    </article>`).join("");
-  $$(".result-play").forEach(b => b.addEventListener("click", () => {
-    const selected = results[Number(b.dataset.resultIndex)];
-    if (selected.searchShortcut) {
-      // SoundCloud's Widget API accepts track permalinks, not search-result URLs.
-      // Open the catalogue search explicitly; never pretend this URL is a playable track.
-      window.location.assign(selected.permalink_url);
-      return;
-    }
-    enqueueAndPlay(selected, results);
-  }));
+function sourceLabel(track) {
+  if (track.preview || track.source === "preview") return "Превью 30с";
+  return ({youtube:"YouTube",soundcloud:"SoundCloud",local:"Мои файлы"})[track.source] || track.source;
 }
+function coverMarkup(track, sizeClass="") {
+  const src = track.artwork || "";
+  return `<span class="cover-frame ${sizeClass} ${src ? "is-loading" : "is-placeholder"}">${src ? `<img src="${escapeHTML(src)}" alt="" loading="lazy" onload="this.parentElement.classList.remove('is-loading')" onerror="this.remove();this.parentElement.classList.remove('is-loading');this.parentElement.classList.add('is-placeholder')">` : `<span class="vinyl-placeholder"><span>♫</span></span>`}</span>`;
+}
+async function enrichArtwork(track) {
+  if (!track || track.searchShortcut || track.source === "local" || track.artwork) return track;
+  if (track.artwork_url) {
+    track.artwork = track.artwork_url.replace("-large", "-t500x500");
+    updateTrackArtwork(track);
+    return track;
+  }
+  const term = `${track.artist || ""} ${track.title || ""}`.trim();
+  if (!term) return track;
+  try {
+    const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=1`);
+    if (response.ok) {
+      const data = await response.json(), result = data.results?.[0];
+      if (result?.artworkUrl100) {
+        track.artwork = result.artworkUrl100.replace(/100x100bb/i, "200x200bb");
+        updateTrackArtwork(track);
+        return track;
+      }
+    }
+  } catch { /* Try Deezer below. */ }
+  try {
+    const response = await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(term)}`);
+    if (response.ok) {
+      const data = await response.json(), result = data.data?.[0];
+      if (result?.album?.cover_big || result?.album?.cover_medium) {
+        track.artwork = result.album.cover_big || result.album.cover_medium;
+        updateTrackArtwork(track);
+      }
+    }
+  } catch { /* Use the shared vinyl placeholder when no cover provider responds. */ }
+  return track;
+}
+function updateTrackArtwork(track) {
+  $$(`[data-cover-id="${CSS.escape(track.id)}"]`).forEach(node => {
+    node.innerHTML = coverMarkup(track);
+  });
+  if (currentTrack()?.id === track.id) {
+    $("#cover").style.backgroundImage = track.artwork ? `url("${track.artwork}")` : "";
+    $("#cover").textContent = track.artwork ? "" : "♫";
+    $("#cover").classList.toggle("vinyl-cover", !track.artwork);
+  }
+  renderQueue();
+}
+function attachLikeActions() {
+  $$("[data-like-id]").forEach(button => {
+    button.onclick = e => {
+      e.stopPropagation();
+      toggleLike(findTrack(button.dataset.likeId));
+    };
+  });
+}
+function findTrack(id) {
+  return state.queue.find(t=>t.id===id) || localTracks.find(t=>t.id===id) ||
+    Object.values(favorites).find(t=>t.id===id) || null;
+}
+function renderTrackRow(track, index, context="search") {
+  return `<article class="youtube-result track-row ${track.unavailable ? "unavailable" : ""}" data-track-id="${escapeHTML(track.id)}">
+    <span class="track-cover" data-cover-id="${escapeHTML(track.id)}">${coverMarkup(track)}</span>
+    <div class="youtube-result-copy"><b>${escapeHTML(track.title)}</b><small>${escapeHTML(track.artist || "")}${track.duration ? " · "+formatTime(track.duration) : ""}</small><span class="source-badge source-${escapeHTML(track.source)}">${sourceLabel(track)}</span></div>
+    <button class="queue-add-inline" data-add-queue="${index}" title="Добавить в очередь">＋</button>
+    <button class="heart row-heart ${isLiked(track) ? "liked" : ""}" data-like-id="${escapeHTML(track.id)}" title="В избранное">${isLiked(track) ? "♥" : "♡"}</button>
+    <button class="result-play" data-row-play="${index}" title="Играть">▶</button>
+  </article>`;
+}
+function wireRows(container, tracks, playHandler) {
+  container.querySelectorAll("[data-row-play]").forEach(button => button.addEventListener("click", () => {
+    const track=tracks[Number(button.dataset.rowPlay)];
+    if(track?.source==="local"&&!track.objectUrl){toast("Загрузи этот локальный файл заново");return;}
+    playHandler(track);
+  }));
+  container.querySelectorAll("[data-add-queue]").forEach(button => button.addEventListener("click", () => addToQueue(tracks[Number(button.dataset.addQueue)])));
+  attachLikeActions();
+}
+function renderQueueCount() {
+  const count = state.queue.length;
+  if ($("#queueCount")) $("#queueCount").textContent = count;
+  if ($("#queueHeadingCount")) $("#queueHeadingCount").textContent = `· ${count} ${count===1?"трек":count<5?"трека":"треков"}`;
+}
+function renderQueue() {
+  const list = $("#queueList");
+  if (!list) return;
+  if (!state.queue.length) {
+    list.innerHTML = '<div class="queue-empty"><span>☷</span><b>Очередь пуста</b><small>Найди трек и добавь его в воспроизведение</small></div>';
+    renderQueueCount(); return;
+  }
+  list.innerHTML = state.queue.map((track,index)=>`
+    <article class="queue-row ${index===state.index?"is-current":""}" data-queue-index="${index}" data-queue-id="${escapeHTML(track.id)}">
+      <span class="drag-handle" aria-label="Перетащить">⠿</span>
+      <span class="queue-cover" data-cover-id="${escapeHTML(track.id)}">${coverMarkup(track)}</span>
+      <div class="queue-track-copy"><b>${escapeHTML(track.title)}</b><small>${escapeHTML(track.artist||"")}</small><span class="source-badge source-${escapeHTML(track.source)}">${sourceLabel(track)}</span></div>
+      <button class="queue-next" data-queue-next="${index}" title="Играть следующим">↥</button>
+      <button class="heart row-heart ${isLiked(track)?"liked":""}" data-like-id="${escapeHTML(track.id)}" title="В избранное">${isLiked(track)?"♥":"♡"}</button>
+      <button class="queue-remove" data-queue-remove="${index}" title="Удалить">×</button>
+    </article>`).join("");
+  list.querySelectorAll("[data-queue-remove]").forEach(button=>button.addEventListener("click",()=>removeQueueItem(Number(button.dataset.queueRemove))));
+  list.querySelectorAll("[data-queue-next]").forEach(button=>button.addEventListener("click",()=>moveQueueNext(Number(button.dataset.queueNext))));
+  list.querySelectorAll(".queue-row").forEach(row=>wireQueueDrag(row));
+  attachLikeActions(); renderQueueCount();
+}
+function addToQueue(track, playNext=false) {
+  if (!track || track.searchShortcut) return;
+  const copy={...track};
+  if (playNext && state.index>=0) state.queue.splice(state.index+1,0,copy);
+  else state.queue.push(copy);
+  if (state.index<0 && !playNext) state.index=state.queue.length-1;
+  saveState(); renderQueue(); toast(playNext?"Добавлено следующим":"Добавлено в очередь");
+}
+function removeQueueItem(index) {
+  if (index<0 || index>=state.queue.length) return;
+  const wasCurrent=index===state.index;
+  const removed=state.queue[index];
+  state.queue.splice(index,1);
+  if (index<state.index) state.index--;
+  else if (wasCurrent) {
+    if (state.queue.length) {
+      state.index=Math.min(index,state.queue.length-1);
+      activeProvider?.stop(); playCurrent();
+    } else {
+      state.index=-1; activeProvider?.stop(); activeProvider=null;
+      $("#trackTitle").textContent="Ничего не играет"; $("#trackArtist").textContent="Выбери свой первый трек";
+      $("#cover").style.backgroundImage=""; $("#cover").textContent="♫";
+    }
+  }
+  saveState(); renderQueue();
+}
+function moveQueueNext(index) {
+  if(index<0||index>=state.queue.length||index===state.index||index===state.index+1)return;
+  const [track]=state.queue.splice(index,1);
+  const target=state.index<0?0:state.index+1;
+  state.queue.splice(target,0,track);
+  saveState();renderQueue();toast("Трек будет следующим");
+}
+function wireQueueDrag(row) {
+  const handle=row.querySelector(".drag-handle");
+  if(!handle)return;
+  let targetIndex=null, pointerId=null;
+  handle.addEventListener("pointerdown",e=>{
+    pointerId=e.pointerId;targetIndex=Number(row.dataset.queueIndex);
+    row.classList.add("dragging");
+    handle.setPointerCapture?.(pointerId);
+  });
+  handle.addEventListener("pointermove",e=>{
+    if(pointerId!==e.pointerId)return;
+    const target=document.elementFromPoint(e.clientX,e.clientY)?.closest(".queue-row");
+    if(target)targetIndex=Number(target.dataset.queueIndex);
+  });
+  const finish=e=>{
+    if(pointerId!==e.pointerId)return;
+    const from=Number(row.dataset.queueIndex),to=targetIndex;
+    row.classList.remove("dragging");pointerId=null;
+    if(Number.isInteger(from)&&Number.isInteger(to)&&from!==to){
+      const playingId=currentTrack()?.id;
+      const [item]=state.queue.splice(from,1);state.queue.splice(to,0,item);
+      state.index=playingId?state.queue.findIndex(t=>t.id===playingId):-1;
+      saveState();renderQueue();
+    }
+  };
+  handle.addEventListener("pointerup",finish);
+  handle.addEventListener("pointercancel",()=>{row.classList.remove("dragging");pointerId=null;});
+}
+function renderFavorites() {
+  const tracks=Object.values(favorites).sort((a,b)=>(b.likedAt||0)-(a.likedAt||0));
+  const list=$("#favoritesList");
+  if(!tracks.length){list.innerHTML='<div class="search-placeholder"><span>♡</span><b>Пока ничего не сохранено</b><p>Отмечай треки сердечком — они появятся здесь.</p></div>';return;}
+  list.innerHTML=tracks.map((track,i)=>renderTrackRow(track,i,"favorites")).join("");
+  wireRows(list,tracks,track=>{
+    if(track.source==="local"&&!localTracks.some(t=>t.id===track.id)){toast("Локальный файл нужно загрузить заново");return;}
+    enqueueAndPlay(track,tracks);
+  });
+}
+function renderResults(results) {
+  $("#searchResults").innerHTML = results.map((track,index)=>renderTrackRow(track,index)).join("");
+  wireRows($("#searchResults"),results,selected=>enqueueAndPlay(selected,results));
+  results.forEach(track=>enrichArtwork(track));
+}
+
 async function searchTracks() {
   const query = $("#searchInput").value.trim();
   if (!query) return toast("Напиши название трека или исполнителя");
@@ -347,24 +565,33 @@ $$("[data-source]").forEach(b => b.addEventListener("click", () => {
 }));
 
 function enqueueAndPlay(track, results) {
-  const start = results.findIndex(x => x.id === track.id);
-  state.queue = results.filter(x => !x.searchShortcut || x.id === track.id).map(x => ({...x}));
-  state.index = Math.max(0,start);
+  if (!track || track.searchShortcut) return;
+  const sourceList = results.filter(item=>!item.searchShortcut);
+  const start=sourceList.findIndex(item=>item.id===track.id);
+  state.queue=sourceList.map(item=>({...item}));
+  state.index=Math.max(0,start);
   $("#searchView").classList.add("hidden");
-  saveState(); playCurrent();
+  saveState(); renderQueue(); playCurrent();
 }
+
 function playCurrent() {
   const track = currentTrack();
   if (!track) return;
   if (activeProvider && activeProvider !== providers[track.source]) activeProvider.stop();
   activeProvider = providers[track.source];
   if (!activeProvider) return setStatus("Источник не поддерживается", true);
+  if (track.source === "local" && !track.objectUrl) {
+    setStatus("Локальный файл нужно загрузить заново", true);
+    track.unavailable = true;
+    return;
+  }
   $("#trackTitle").textContent = track.title;
   $("#trackArtist").textContent = track.artist;
   $("#cover").style.backgroundImage = track.artwork ? `url("${track.artwork}")` : "";
   $("#cover").textContent = track.artwork ? "" : "♫";
-  $("#likeBtn").textContent = favorites.has(track.id) ? "♥" : "♡";
-  $("#likeBtn").classList.toggle("liked", favorites.has(track.id));
+  $("#cover").classList.toggle("vinyl-cover", !track.artwork);
+  refreshLikeButtons();
+  enrichArtwork(track);
   $("#playBtn").textContent = "Ⅱ";
   $("#youtubeStage").classList.toggle("audio-mode", track.source !== "youtube" || !state.videoMode);
   $("#youtubeStage").classList.toggle("video-mode", track.source === "youtube" && state.videoMode);
@@ -424,10 +651,10 @@ audio.addEventListener("pause",() => { if(currentTrack()?.source==="local") $("#
 audio.addEventListener("timeupdate",() => { if(currentTrack()?.source==="local" && audio.duration){$("#seek").value=audio.currentTime/audio.duration*100;$("#currentTime").textContent=formatTime(audio.currentTime);$("#duration").textContent=formatTime(audio.duration);} });
 
 function renderLocalTracks() {
-  $("#localTracks").innerHTML=localTracks.map(t=>`
-    <article class="youtube-result"><div class="local-file-icon">♫</div><div class="youtube-result-copy"><b>${escapeHTML(t.title)}</b><small>Мои файлы · только эта сессия</small><span class="source-badge source-local">Мои файлы</span></div>
-    <button class="result-play" data-local-play="${escapeHTML(t.id)}">▶</button></article>`).join("");
-  $$("[data-local-play]").forEach(b=>b.addEventListener("click",()=>enqueueAndPlay(localTracks.find(t=>t.id===b.dataset.localPlay),localTracks)));
+  const container=$("#localTracks");
+  container.innerHTML=localTracks.map((track,index)=>renderTrackRow(track,index,"local")).join("");
+  wireRows(container,localTracks,track=>enqueueAndPlay(track,localTracks));
+  localTracks.forEach(track=>enrichArtwork(track));
 }
 function addFiles(files) {
   [...files].filter(f=>f.type.startsWith("audio/")).forEach(file=>{
@@ -447,17 +674,33 @@ $("#artworkInput").addEventListener("change",e=>{
   const file=e.target.files[0], track=currentTrack();
   if(file && track?.source==="local" && file.type.startsWith("image/")){
     track.artwork=URL.createObjectURL(file); $("#cover").style.backgroundImage=`url("${track.artwork}")`; $("#cover").textContent="";
+    $("#cover").classList.remove("vinyl-cover"); updateTrackArtwork(track);
   }
   e.target.value="";
 });
-$("#likeBtn").addEventListener("click",()=>{
-  const t=currentTrack(); if(!t)return;
-  favorites.has(t.id)?favorites.delete(t.id):favorites.add(t.id);
-  localStorage.setItem("mibbi-favs",JSON.stringify([...favorites]));
-  $("#likeBtn").textContent=favorites.has(t.id)?"♥":"♡";
-  $("#likeBtn").classList.toggle("liked",favorites.has(t.id));
+$("#likeBtn").addEventListener("click",()=>toggleLike(currentTrack()));
+
+function openQueue(){renderQueue();$("#queueModal").classList.remove("hidden");}
+function closeQueue(){$("#queueModal").classList.add("hidden");}
+$("#queueBtn").addEventListener("click",openQueue);
+$("#closeQueue").addEventListener("click",closeQueue);
+$("#queueDone").addEventListener("click",closeQueue);
+$("#queueModal").addEventListener("click",e=>{if(e.target===$("#queueModal"))closeQueue();});
+$("#clearQueue").addEventListener("click",()=>{
+  state.queue=[];state.index=-1;activeProvider?.stop();activeProvider=null;
+  $("#trackTitle").textContent="Ничего не играет";$("#trackArtist").textContent="Выбери свой первый трек";
+  $("#cover").style.backgroundImage="";$("#cover").textContent="♫";
+  saveState();renderQueue();refreshLikeButtons();toast("Очередь очищена");
 });
-$("#queueBtn").addEventListener("click",()=>toast(`В очереди ${state.queue.length} треков`));
+$("#resumeNotice").classList.toggle("hidden",!pendingResume);
+if(pendingResume){
+  $("#resumeNotice").innerHTML=`Продолжить с трека: <b>${escapeHTML(pendingResume.title)}</b> <button class="outline-btn" id="resumeTrack">Продолжить</button>`;
+  $("#resumeTrack").addEventListener("click",()=>{
+    state.index=pendingResume.index;pendingResume=null;$("#resumeNotice").classList.add("hidden");
+    playCurrent();renderQueue();
+  });
+}
+
 
 $$("[data-source-setting]").forEach(input=>{
   input.checked=state.sources[input.dataset.sourceSetting] !== false;
@@ -478,6 +721,7 @@ $("#autoplaySetting").checked=localStorage.getItem("mibbi-auto")!=="false";
 $("#autoplaySetting").addEventListener("change",e=>localStorage.setItem("mibbi-auto",e.target.checked));
 
 document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"&&!$("#queueModal").classList.contains("hidden")) closeQueue();
   if(e.target.matches("input,textarea,select")||e.target.isContentEditable)return;
   if(e.code==="Space"){e.preventDefault();togglePlayback();}
   else if(e.key==="ArrowLeft"&&activeProvider){e.preventDefault();activeProvider.seek(Math.max(0,activeProvider.currentTime()-5));}
@@ -490,3 +734,11 @@ document.addEventListener("keydown",e=>{
 $("#shuffleBtn").classList.toggle("selected",state.shuffle);
 $("#repeatBtn").classList.toggle("selected",state.repeat);
 if(currentTrack()){ $("#trackTitle").textContent=currentTrack().title; $("#trackArtist").textContent=currentTrack().artist; }
+
+renderFavoriteCount();
+renderFavorites();
+renderQueue();
+refreshLikeButtons();
+if (pendingResume) {
+  $("#resumeNotice").classList.remove("hidden");
+}

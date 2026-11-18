@@ -16,7 +16,7 @@
   <button class="nav-item" data-view="search"><span>⌕</span> Поиск</button>
   <button class="nav-item" data-view="library"><span>▤</span> Моя медиатека</button>
   <div class="side-label playlist-label">ТВОЯ КОЛЛЕКЦИЯ</div>
-  <button class="nav-item" data-view="favorites"><span>♡</span> Избранное</button>
+  <button class="nav-item" data-view="favorites"><span>♡</span> Мне нравится <small class="nav-count" id="favoriteCount">0</small></button>
   <button class="nav-item" data-view="local"><span>＋</span> Локальные файлы</button>
   <div class="sidebar-bottom"><div class="mini-note"><span class="pulse"></span><div><b>Твоя музыка.</b><small>Без лишнего шума.</small></div></div>
   <button class="nav-item settings-link" id="settingsBtn"><span>⚙</span> Настройки</button></div>
@@ -45,13 +45,13 @@
   <div class="hint">Источники можно включать и отключать в настройках. Локальные файлы доступны только в текущей сессии.</div>
 </div>
 <div class="view hidden" id="libraryView"><p class="eyebrow">ТВОЯ МЕДИАТЕКА</p><h1 class="page-title">Всё <em>твоё.</em></h1><div class="empty-panel"><div class="empty-icon">▤</div><div><b>Медиатека пока пуста</b><p>Локальные файлы доступны прямо в браузере и не загружаются на сервер.</p></div><button class="outline-btn" id="libraryAdd">Добавить файлы</button></div></div>
-<div class="view hidden" id="favoritesView"><p class="eyebrow">СОХРАНЁННОЕ</p><h1 class="page-title">Твоё <em>избранное.</em></h1><div id="favoritesList" class="track-list"><div class="search-placeholder"><span>♡</span><b>Пока ничего не сохранено</b><p>Отмечай локальные треки сердечком.</p></div></div></div>
+<div class="view hidden" id="favoritesView"><p class="eyebrow">ТВОЯ КОЛЛЕКЦИЯ</p><h1 class="page-title">Мне <em>нравится.</em></h1><p class="collection-count" id="favoritesHeadingCount">0 треков · Лайки хранятся только на этом устройстве</p><div id="favoritesList" class="track-list"><div class="search-placeholder"><span>♡</span><b>Пока ничего не сохранено</b><p>Отмечай локальные треки сердечком.</p></div></div></div>
 <div class="view hidden" id="localView"><p class="eyebrow">ТВОИ ФАЙЛЫ</p><h1 class="page-title">Локальная <em>музыка.</em></h1><div class="dropzone" id="dropzone"><div class="empty-icon">＋</div><b>Перетащи аудио или видео сюда</b><p>MP3, WAV, FLAC, M4A, OGG, MP4, WebM и другие форматы, которые поддерживает браузер.</p><button class="primary-btn" id="chooseFiles">Выбрать файлы</button><input type="file" id="fileInput" accept="audio/*" multiple hidden><input type="file" id="artworkInput" accept="image/*" hidden></div><div id="localTracks" class="track-list"></div></div>
 </section>
 <footer class="player">
 <div class="now-playing"><button class="cover" id="cover" type="button" title="Назначить обложку">♫</button><div class="track-meta"><b id="trackTitle">Ничего не играет</b><small id="trackArtist">Выбери свой первый трек</small></div><button class="heart" id="likeBtn" title="В избранное">♡</button></div>
 <div class="player-center"><div class="controls"><button class="control" id="shuffleBtn" title="Перемешать">⤨</button><button class="control" id="prevBtn" title="Предыдущий">◀</button><button class="play-btn" id="playBtn" title="Играть">▶</button><button class="control" id="nextBtn" title="Следующий">▶</button><button class="control" id="repeatBtn" title="Повтор" aria-label="Повтор">↻</button></div><div class="timeline"><span id="currentTime">0:00</span><input type="range" id="seek" min="0" max="100" value="0"><span id="duration">0:00</span></div></div>
-<div class="player-extra"><button class="control" id="videoToggle" title="Показать / скрыть видео">▣</button><button class="control" id="queueBtn" title="Очередь">☷</button><span>🔊</span><input type="range" id="volume" min="0" max="1" step=".01" value=".8"></div>
+<div class="player-extra"><button class="control" id="videoToggle" title="Показать / скрыть видео">▣</button><button class="control" id="queueBtn" title="Очередь">☷<span class="queue-count" id="queueCount">0</span></button><span>🔊</span><input type="range" id="volume" min="0" max="1" step=".01" value=".8"></div>
 <div class="player-status" id="playerStatus" role="status" aria-live="polite">Выбери трек для воспроизведения</div>
 <div class="youtube-stage audio-mode" id="youtubeStage"><div id="ytPlayer"></div></div>
 <div class="soundcloud-stage" id="soundcloudStage"><iframe id="scWidget" allow="autoplay" scrolling="no" frameborder="no"></iframe></div>
@@ -67,8 +67,18 @@
 <div class="setting-row"><div><b>Мои файлы</b><small>Локальные аудиофайлы этой сессии</small></div><label class="switch"><input type="checkbox" data-source-setting="local" checked><span></span></label></div>
 <div class="setting-row"><div><b>Видеоплеер</b><small>Показывать видео, если оно доступно</small></div><label class="switch"><input type="checkbox" id="videoSetting" checked><span></span></label></div>
 <div class="setting-row"><div><b>Автовоспроизведение</b><small>Продолжать локальную очередь</small></div><label class="switch"><input type="checkbox" id="autoplaySetting" checked><span></span></label></div>
-<div class="setting-row"><div><b>Сохранение</b><small>Тема и избранное хранятся в этом браузере</small></div><span class="setting-value">Локально</span></div>
-<div class="modal-foot">mibbi Music <span>Версия 0.1 · Preview</span></div></div></div>
+<div class="setting-row"><div><b>Сохранение</b><small>Лайки хранятся только на этом устройстве</small></div><span class="setting-value">Локально</span></div>
+<div class="modal-foot">mibbi Music <span>Лайки хранятся только на этом устройстве</span></div></div></div>
+<div class="modal-backdrop hidden" id="queueModal" role="dialog" aria-modal="true" aria-labelledby="queueTitle">
+  <section class="queue-modal">
+    <header class="queue-head"><div><p class="eyebrow">СЛЕДУЮЩЕЕ В ЭФИРЕ</p><h2 id="queueTitle">Очередь <span id="queueHeadingCount">· 0 треков</span></h2></div><div class="queue-head-actions"><button class="text-btn" id="clearQueue">Очистить</button><button class="round-btn" id="closeQueue" aria-label="Закрыть">×</button></div></header>
+    <div id="resumeNotice" class="resume-notice hidden"></div>
+    <div id="queueList" class="queue-list"></div>
+    <footer class="queue-foot"><span>Перетаскивай треки, чтобы изменить порядок</span><button class="outline-btn" id="queueDone">Готово</button></footer>
+  </section>
+</div>
 <div class="toast" id="toast"></div>
-<script src="https://www.youtube.com/iframe_api"></script>\n<script src="https://w.soundcloud.com/player/api.js"></script>\n<script src="app.js"></script>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script src="https://w.soundcloud.com/player/api.js"></script>
+<script src="app.js"></script>
 </body></html>
